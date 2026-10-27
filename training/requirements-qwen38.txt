@@ -1,0 +1,8 @@
+# Qwen3.8-27B uses the qwen3_5 architecture, which needs Transformers 5.8 or newer.
+# The CUDA 12.4 wheel matches the A100 driver on Rivanna.
+--extra-index-url https://download.pytorch.org/whl/cu124
+torch==2.6.0
+transformers==5.20.2
+peft==0.21.2
+accelerate
+safetensors

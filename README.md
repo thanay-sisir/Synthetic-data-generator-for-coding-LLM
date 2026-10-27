@@ -1,284 +1,106 @@
-# Python-to-Triton LLM: Automated Code Translation
+# Execution-validated Triton kernel lab
 
-## About Project
+Generate complete Triton implementations with a teacher API, verify them against trusted PyTorch references in GPU containers, retrieve verified examples with PostgreSQL/pgvector, and compare a LoRA code model with a corrected small Transformer.
 
-This project is an advanced end-to-end machine learning initiative focused on developing a specialized LLM capable of automatically translating Python function bodies into highly optimized Triton kernels. It addresses the critical need to bridge the gap between Python's development agility and Triton's unparalleled performance for GPU-accelerated computations. Built upon a foundation of synthetic data.
+**Status:** measured end to end on UVA Rivanna with an A100 80GB allocation. Execution-validated kernels were generated, a LoRA and a scratch model were trained, all four models were scored on 1,200 held-out tasks with the same GPU checker, and the Qwen checkpoints were served with vLLM. PostgreSQL/pgvector retrieval is implemented but was not part of the executed path; the RAG comparison is still unmeasured. The historical CSV contains 45 pairs, not 319 or 2,000, and is not used by the new pipeline.
 
-## Architecture and Metrics
+Implementation checks: **38 tests passed**; see the [validation record](docs/IMPLEMENTATION_VALIDATION.md) for test scope and remaining integration work.
 
-* **Synthetic Data Pipeline:**
-    * A custom pipeline generates and processes over **2,000 unique synthetic Python-Triton code pairs**.
-    * Each pair undergoes rigorous **automated validation** via dedicated test scripts, ensuring data integrity and correctness before inclusion in the training set.
+Start with **[PROJECT_HANDOFF.md](PROJECT_HANDOFF.md)** for complete context and execution order. **[docs/RIVANNA.md](docs/RIVANNA.md)** covers SSH-side setup, Slurm, downloads, LoRA, vLLM and tunnels. **[docs/EMBEDDINGS.md](docs/EMBEDDINGS.md)** covers local CPU embeddings.
 
-* **Transformer LLM Architecture:**
-    * At its core is a **50M-parameter Transformer-based LLM**, custom-implemented in PyTorch.
-    * The model features a multi-layered decoder-only architecture, incorporating advanced components such as **Multi-Head Attention with Rotary Position Embeddings (RoPE)** and a Feed-Forward Network.
+## Pipeline
 
-* **Training & Optimization Metrics:**
-    * The training regimen employs **mixed-precision (AMP)** for accelerated computation and reduced memory footprint.
-    * **Gradient accumulation** is utilized to achieve a **4x effective batch size increase** (e.g., from 24 to 96), enabling more stable training with larger effective batch sizes without requiring excessive GPU memory.
-    * A novel **Muon optimizer**, a hybrid momentum-orthogonalized approach, is implemented to enhance model convergence and stability.
+```text
+Deterministic tasks (family-separated train/validation/test)
+  -> xAI grok-4.7 teacher over the OpenAI-compatible client
+  -> bounded async workers
+  -> static screening + GPU Apptainer validation against the PyTorch reference
+  -> attempts.jsonl (all outcomes) / verified.jsonl (passes only)
+  -> response-only LoRA / corrected scratch-model training
+  -> held-out execution check of every model on unseen families
+  -> vLLM for Qwen base + LoRA -> endpoint benchmark
 
----
-
-## Technical Architecture
-
-### Model Specifications
-
-My project implements a custom decoder-only Transformer architecture with the following specifications:
-
-- **Model Dimension (`d_model`)**: 384
-- **Attention Heads (`n_heads`)**: 8  
-- **Transformer Layers (`n_layers`)**: 6
-- **Feed-Forward Dimension (`d_ff`)**: 1536 (4× expansion ratio)
-- **Total Parameters**: ~50M trainable parameters
-- **Sequence Length**: 512 tokens maximum
-- **Vocabulary**: Leverages SmolLM-135M tokenizer (49,152 tokens)
-
-### Advanced Components
-
-#### 1. Rotary Position Embeddings (RoPE)
-My project employs RoPE for positional encoding, offering superior length extrapolation compared to absolute positional embeddings:
+Optional, implemented but not part of the measured path:
+  -> pgvector training index -> paired RAG/no-RAG execution evaluation
 ```
-θ_i = 10000^(-2i/d) for i ∈ [0, d/2)
-```
-The rotary transformation applies to query and key vectors, enabling the model to capture relative positional information efficiently.
 
-#### 2. Multi-Head Attention with Flash Attention
-Utilizes PyTorch's `scaled_dot_product_attention` with optimized CUDA kernels:
-- **Computational Complexity**: O(n²d) where n is sequence length
-- **Memory Efficient**: Fused attention kernels reduce memory overhead
-- **Causal Masking**: Ensures autoregressive property for language modeling
+Initial scope: contiguous CUDA float32 elementwise operations and row reductions. The task builder supports up to 6,000 coefficient variants across **15 correlated operation families**. This does not mean 6,000 independent operations, formal correctness, or faster kernels. Accepted dataset size depends on execution outcomes.
 
-#### 3. Muon Optimizer (Momentum Orthogonalized by Newton-Schulz)
-A hybrid optimization strategy combining:
-- **Newton-Schulz Iterations**: 5-step orthogonalization via zeroth power computation
-- **Momentum**: 0.95 with Nesterov acceleration
-- **Adaptive LR Scaling**: `lr × √(max(1, rows/cols))` for parameter-specific learning rates
-- **Hybrid Approach**: Muon for 2D weight matrices, AdamW for embeddings and normalization layers
+## Development
 
-**Muon Parameters Distribution**:
-- Muon optimizer: ~45M parameters (linear projections)
-- AdamW optimizer: ~5M parameters (embeddings, LayerNorms)
-
----
-
-## Data Pipeline & Validation
-
-### Synthetic Data Generation
-
-My project's data pipeline consists of **53 unique implementation files**, each containing:
-1. **Python Reference Implementation**: Vanilla PyTorch operations
-2. **Triton Kernel Implementation**: GPU-optimized parallel kernels
-3. **Automated Test Harness**: Numerical validation with `torch.allclose()`
-
-### Validation Framework
-
-The `run_all_tests.py` script executes comprehensive validation:
-- **Timeout Protection**: 60-second limit per test
-- **Exit Code Validation**: Only passing tests (exit code 0) are included
-- **Numerical Accuracy**: Ensures Triton kernels match PyTorch outputs within tolerance
-
-**Validated Data Statistics**:
-- Total implementation files: 53
-- Training pairs extracted: 319 validated examples
-- Success rate: ~100% (only passing tests included in training corpus)
-
----
-
-## Training Configuration
-
-### Hyperparameters
-
-| Parameter | Value | Rationale |
-|-----------|-------|-----------|
-| Batch Size | 24 | Memory-optimized for single GPU |
-| Gradient Accumulation | 4 steps | Effective batch size: 96 |
-| Learning Rate (Muon) | 0.01 | Aggressive for orthogonalized gradients |
-| Learning Rate (AdamW) | 0.001 | Conservative for embeddings |
-| Weight Decay | 0.1 | L2 regularization |
-| Dropout | 0.1 | Applied to attention and FFN |
-| Gradient Clipping | 1.0 | Prevents exploding gradients |
-| Epochs | 10 | Full dataset coverage |
-
-### Learning Rate Schedule
-
-### Mixed Precision Training
-
-- **Automatic Mixed Precision (AMP)**: Reduces memory by ~40%
-- **GradScaler**: Dynamic loss scaling for stable fp16 training
-- **Precision**: bfloat16 for Newton-Schulz iterations, fp16 elsewhere
-
----
-
-## Performance Metrics
-
-### Expected Training Performance
-
-Based on the architecture and configuration:
-
-- **Training Time**: ~2-3 hours on NVIDIA V100/A100 (single GPU)
-- **Memory Usage**: ~8-12 GB VRAM with AMP
-- **Throughput**: ~500-800 tokens/second (depending on GPU)
-- **Convergence**: Perplexity < 10 achievable after 5-7 epochs
-
-### Evaluation Metrics
-
-The model is evaluated using:
-- **Cross-Entropy Loss**: Primary optimization objective
-- **Token Accuracy**: Per-token prediction accuracy
-- **Perplexity**: `exp(loss)` - measures model uncertainty
-
-## Installation & Dependencies
-
-
-
-### Install Dependencies
+Python 3.10+; the runs recorded here used Python 3.13.11 on Rivanna after `gcc/14.2.0`. Python 3.11.4 was removed from the site on 2026-10-23; the old `kernel-client`, `kernel-train` and `kernel-serve` venvs still point at it and do not work.
 
 ```bash
-# Install PyTorch with CUDA support
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
-
-# Install Triton
-pip install triton
-
-# Install transformers for tokenizer
-pip install transformers
-
-# Install additional dependencies
-pip install pandas numpy tqdm
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -e '.[retrieval,dev]'
+python -m unittest discover -s tests -v
+python -m kernel_lab.tasks --variants 20 --output artifacts/tasks.jsonl
 ```
 
----
+Windows can run orchestration/unit tests. GPU containers need supported Linux/NVIDIA Docker or carefully configured WSL2. Docker is the primary validator; optional Apptainer requires explicit weaker-isolation opt-in and site approval. Neither is a hardened hostile-code service.
 
-## Usage Guide
+On Rivanna, Docker was unavailable and an Apptainer `.sif` could not be built (the account is not in `/etc/subuid`). The runs here used an Apptainer sandbox directory at `/scratch/qdf7ea/containers/kernel-lab-validator`, with `--backend apptainer --allow-weaker-isolation`. That shares the host GPU driver and is weaker than Docker.
 
-### 1. Generate Training Data
+Copy `.env.example` to private `.env`, edit values, then in Bash: `set -a; source .env; set +a`. CLIs do not auto-load `.env`. The default teacher is `cohere/north-mini-code:free` on OpenRouter; CPU embeddings can be hosted locally without a separate paid account.
 
-Extract validated Python-Triton pairs from synthetic implementations:
+## Results
 
-```bash
-python extract_training_data.py
-```
+Every number below comes from a saved ledger or summary in `artifacts/`. Held-out means the 1,200 `test` tasks from `artifacts/tasks-v1.jsonl`: 400 each of `sigmoid_affine`, `row_max`, and `row_relu_sum`. None of those three families appears in training.
 
-**Output**: `training_data.csv` with 319 training examples.
+| Measurement | Current result | Evidence |
+|---|---|---|
+| Historical examples | 45 CSV pairs / 53 source files | Checked-in files; not new verification |
+| New verified pairs | 1,894 passing records from 10 train families + 2 validation families | `artifacts/grok-*/summary.json`, `artifacts/verified-qwen38.jsonl` |
+| Supervised records | 1,798 train / 96 validation / 0 test | `artifacts/sft-qwen38/manifest.json` |
+| Held-out RAG / no-RAG pass rate | Not measured | Retrieval comparison was not run |
+| p50 / p95 latency, output tokens/sec | Base: 10.47 / 12.21 s, 101.9 tok/s. LoRA: 10.25 / 11.44 s, 94.5 tok/s | `artifacts/bench-qwen38-*/summary.json` |
+| API cost per verified pair | Known: $7.18 in response tokens for 1,037 passes across the runs that wrote a summary. The earlier cancelled run (`artifacts/grok-train-2000`, 857 passes) wrote no summary, so its cost is unknown, not zero. | `artifacts/grok-*/summary.json`; unknown stays null |
 
-### 2. Train the Model
+### Held-out kernel correctness, same 1,200 tasks, same GPU checker
 
-Run the full training pipeline:
+| Model | Passed | `sigmoid_affine` | `row_max` | `row_relu_sum` | Job / ledger |
+|---|---|---|---|---|---|
+| Qwen3.8-27B, no fine-tune | 537 / 1,200 | 400 | 117 | 20 | 21918029, `artifacts/eval-qwen38-base-test` |
+| Qwen3.8-27B + LoRA r16, 1 epoch | **1,178 / 1,200** | 378 | 400 | 400 | 21918030, `artifacts/eval-qwen38-lora-test` |
+| Qwen2.5-Coder-0.5B + LoRA r16, 1 epoch | 147 / 1,200 | 147 | 0 | 0 | 22006999, `artifacts/eval-qwen25-coder-0.5b-test` |
+| Scratch Transformer, 29.5M, 3 epochs | 0 / 1,200 | 0 | 0 | 0 | 21913925, `artifacts/eval-scratch-test` |
 
-```bash
-python llm.py
-```
+Reading the table:
 
-**Training Process**:
-- Loads and tokenizes training data
-- Initializes 50M-parameter Transformer model
-- Trains for 10 epochs with Muon optimizer
-- Saves checkpoint to `trained_model.pth`
-- Displays demo generations
+- The 27B LoRA fixed both row-reduction families completely (400/400 and 400/400). All 22 of its failures are numerical, and all are in `sigmoid_affine`.
+- The untouched 27B model mostly broke the sandbox's host-code rules: 249 kernels used a Python `for` loop on the host, 147 called `zero_`, and 28 had a syntax error. The checker is rejecting illegal host code, not only wrong numbers.
+- The 0.5B coder learned part of the elementwise family and no row reduction. 419 of its failures returned the wrong shape (a per-block result instead of one scalar per row), 424 were numerically wrong, and 179 failed to compile.
+- The from-scratch model never produced a legal Triton module from these 1,798 kernels. That is the control: the gain above comes from pretrained code ability, not from the data alone.
 
-**Expected Output**:
-```
-🌱 Set all seeds to 42
-🔍 Device: CUDA
-📊 Model Configuration:
-   Architecture: 384d, 6L, 8H, 1536ff
-   Training: 10 epochs, batch size 24
-📊 Total parameters: 50,331,648
-...
-🎉 TRAINING COMPLETED!
-⏱️ Total time: 120.5 minutes
-🏆 Final Results:
-   Validation Loss: 2.1234
-   Validation Perplexity: 8.35
-```
+### Training resources
 
-### 3. Interactive Demo
+| Run | Hardware | Wall time | Loss |
+|---|---|---|---|
+| Qwen3.8-27B LoRA, job 21910579 | 1× A100 80GB | 1.24 h (process) | train 0.0533, validation 0.0326 |
+| Qwen2.5-Coder-0.5B LoRA, job 22001802 | 1× A100 80GB | 0.15 h (process) | train 0.1554, validation 0.0483 |
+| Scratch 29.5M, job 21913389 | 1× A100 80GB | 0.029 h | validation 0.405 → 0.353 → 0.372 |
 
-Test the trained model with custom Python functions:
+These are next-token losses on kernel source. They are not pass rates, and lowering them further does not by itself raise the held-out score.
 
-```bash
-python llm.py --demo
-```
+### Serving
 
-**Example Session**:
-```
-🎮 INTERACTIVE DEMO MODE
-Enter Python functions and see the generated Triton kernels!
+| Measurement | Base Qwen3.8-27B | + LoRA r16 | Evidence |
+|---|---|---|---|
+| Requests succeeded | 24 / 24 | 24 / 24 | `artifacts/bench-qwen38-*/summary.json` |
+| p50 complete-response latency | 10.47 s | 10.25 s | same |
+| p95 complete-response latency | 12.21 s | 11.44 s | same |
+| Aggregate output tokens/sec (4 workers) | 101.9 | 94.5 | same |
+| Median per-request output tokens/sec | 27.1 | 23.8 | same |
 
-🐍 Enter Python function: y = torch.sigmoid(x)
+Served by vLLM 0.32.0 on one A100 80GB, thinking off, 8,192-token context, 1,024-token cap, 24 held-out tasks, 2 warmup requests excluded. Job 22064175, 13 minutes total including a 51.27 GiB weight load and a ~2-minute `torch.compile`. The 24 requests are a small sample, and the LoRA row is slightly slower because the adapter adds a per-token matmul, not because its kernels are worse.
 
-🔄 Generating Triton kernel...
+The held-out scores above were produced by loading each model in the evaluation job and generating one kernel at a time, then checking it in the sandbox. They were not produced by vLLM. This table measures a different thing: how fast the same checkpoints answer through an OpenAI-compatible server. No kernel validation happens in this benchmark.
 
-🎯 Generated Triton kernel:
-pid = tl.program_id(axis=0)
-offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-mask = offsets < n_elements
-x = tl.load(input_ptr + offsets, mask=mask)
-result = tl.sigmoid(x)
-tl.store(output_ptr + offsets, result, mask=mask)
-```
+Render completed reports with `python -m kernel_lab.metrics PATH_TO_SUMMARY_JSON ...`, then copy the measured table here with run IDs, hardware and methodology. Unknown costs remain null.
 
----
+## Baseline
 
-## Research Contributions
+The custom model shares input/output embeddings: about **29.5M parameters** with the original 49,152-token vocabulary. RoPE now uses sequence positions, accumulation flushes partial groups, and scheduling counts optimizer updates. The old overlapping-window experiment requires `--legacy-experiment` because it leaks validation content. Use `python -m kernel_lab.baseline` for new family-separated comparisons.
 
-### Key Innovations
-
-1. **Domain-Specific LLM**: First specialized model for Python→Triton translation
-2. **Synthetic Data Validation**: Automated testing ensures 100% correctness of training data
-3. **Muon Optimization**: Novel application of orthogonalized momentum for code generation
-4. **Efficient Architecture**: 50M parameters achieve strong performance with minimal compute
-
-### Applications
-
-- **Kernel Optimization**: Automate GPU kernel development
-- **Performance Acceleration**: Bridge Python-Triton gap for ML practitioners
-- **Educational Tool**: Learn Triton programming patterns from Python code
-- **Research Platform**: Foundation for code translation research
-
----
-
-## Model Capabilities
-
-My project demonstrates proficiency in translating:
-
-- **Element-wise Operations**: `add`, `multiply`, `sigmoid`, `tanh`, `exp`, `log`
-- **Broadcasting**: Implicit shape expansion in binary operations
-- **Reduction Operations**: `sum`, `mean`, `max`, `min` across dimensions
-- **Advanced Functions**: `matmul`, `softmax`, `layer_norm`, `reshape`
-- **Memory Patterns**: Coalesced loads/stores with masking for boundary handling
-
-**Example Translations** (simplified):
-
-| Python | Generated Triton |
-|--------|------------------|
-| `y = x + 5` | `tl.store(y_ptr, tl.load(x_ptr) + 5)` |
-| `y = torch.sigmoid(x)` | `tl.store(y_ptr, tl.sigmoid(tl.load(x_ptr)))` |
-| `y = x.sum()` | Multi-stage reduction kernel with shared memory |
-
----
-
-## Limitations & Future Work
-
-### Current Limitations
-
-- **Context Length**: Limited to 512 tokens (restricts complex kernels)
-- **Training Data**: 319 examples may underfit distribution
-- **Validation**: No execution-based verification of generated kernels
-- **Error Handling**: No syntax/semantic checking of outputs
-
-### Future Enhancements
-
-1. **Scale Training Data**: Generate 10K+ validated examples
-2. **Longer Context**: Extend to 2048+ tokens using sparse attention
-3. **Execution Feedback**: RL-based fine-tuning with compiler feedback
-4. **Multi-Task Learning**: Support PyTorch→CUDA, JAX→XLA translations
-5. **Quantization**: Deploy 4-bit/8-bit models for edge inference
-
-
-
-**Contact**: For questions or collaboration, reach out via GitHub Issues.
-
-**Status**: 🚀 Active Development | 🔬 Research Project
+The custom model uses PyTorch inference; it is not supported by vLLM. Qwen base/LoRA are served with vLLM 0.32.0 in `/scratch/qdf7ea/venvs/kernel-serve-py313`, separate from the training venv because vLLM replaces torch and transformers. The [historical README](docs/LEGACY_README.md) is preserved only as superseded context.

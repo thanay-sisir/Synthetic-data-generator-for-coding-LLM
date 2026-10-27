@@ -1,0 +1,4 @@
+# Separate serving environment. vLLM replaces torch and transformers, so it must
+# not share the training venv. vLLM 0.32.0 is the newest release that resolves
+# for Python 3.13; the Qwen3.8-27B recipe asks for vLLM 0.17.0 or newer.
+vllm==0.32.0

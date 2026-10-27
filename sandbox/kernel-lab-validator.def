@@ -1,0 +1,24 @@
+Bootstrap: docker
+From: pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime
+
+%files
+    sandbox/runner.py /opt/runner.py
+
+%post
+    apt-get update
+    apt-get install -y --no-install-recommends gcc libc6-dev
+    rm -rf /var/lib/apt/lists/*
+    python -m pip install --no-cache-dir "triton==3.2.0"
+    chmod 644 /opt/runner.py
+
+%environment
+    export TRITON_CACHE_DIR=/tmp/triton-cache
+    export HOME=/tmp
+    export PYTHONDONTWRITEBYTECODE=1
+    export LC_ALL=C
+
+%runscript
+    exec python /opt/runner.py "$@"
+
+%labels
+    org.kernel-lab.validator "pytorch-2.6.0-cuda12.4-triton-3.2.0"

@@ -1,0 +1,6 @@
+# Separate from the vLLM environment. Tested installation still required on Rivanna.
+torch==2.6.0
+transformers==4.51.3
+peft==0.15.2
+accelerate==1.6.0
+safetensors==0.5.3

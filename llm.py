@@ -14,8 +14,6 @@ from typing import List, Optional
 import warnings
 import os
 import pickle
-import pandas as pd
-warnings.filterwarnings('ignore')
 
 def set_seed(seed: int = 42):
     """Set all random seeds for reproducibility"""
@@ -138,6 +136,7 @@ def load_and_cache_data(config: ModelConfig, cache_dir: str = "data_cache"):
 
     # Load training data from CSV
     try:
+        import pandas as pd
         df = pd.read_csv("training_data.csv")
         print(f"📊 Loaded CSV with {len(df)} rows")
         print(f"Columns: {list(df.columns)}")
@@ -210,8 +209,12 @@ class Rotary(nn.Module):
         self.register_buffer('sin', theta.sin(), persistent=False)
 
     def forward(self, x_BTHD: torch.Tensor):
-        assert self.cos.size(0) >= x_BTHD.size(-3)
-        cos, sin = self.cos[None, :x_BTHD.size(-3), None, :], self.sin[None, :x_BTHD.size(-3), None, :]
+        # Attention supplies [batch, heads, sequence, head_dimension].
+        seq_len = x_BTHD.size(-2)
+        if seq_len > self.cos.size(0):
+            raise ValueError("Sequence exceeds configured context length")
+        cos = self.cos[None, None, :seq_len, :]
+        sin = self.sin[None, None, :seq_len, :]
         x1, x2 = x_BTHD.to(dtype=torch.float32).chunk(2, dim=-1)
         y1 = x1 * cos + x2 * sin
         y2 = x1 * (-sin) + x2 * cos
@@ -448,7 +451,7 @@ def train_model(config: ModelConfig, train_loader: DataLoader, val_loader: DataL
     optimizers = setup_muon_optimizer(model, config)
 
     # Calculate total steps for learning rate scheduling
-    total_steps = len(train_loader) * config.num_epochs
+    total_steps = math.ceil(len(train_loader) / config.gradient_accumulation_steps) * config.num_epochs
     
     # Learning rate schedule
     schedulers = []
@@ -458,7 +461,7 @@ def train_model(config: ModelConfig, train_loader: DataLoader, val_loader: DataL
             if step < warmup_steps:
                 return step / warmup_steps
             else:
-                progress = (step - warmup_steps) / (total_steps - warmup_steps)
+                progress = min(1.0, (step - warmup_steps) / max(1, total_steps - warmup_steps))
                 return 0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * progress))
 
         scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
@@ -482,22 +485,24 @@ def train_model(config: ModelConfig, train_loader: DataLoader, val_loader: DataL
         
         for batch_idx, (x, y) in enumerate(pbar):
             x, y = x.to(device), y.to(device)
+            group_start = (batch_idx // config.gradient_accumulation_steps) * config.gradient_accumulation_steps
+            accumulation_divisor = min(config.gradient_accumulation_steps, len(train_loader) - group_start)
 
             # Forward pass with gradient accumulation
             if config.use_amp:
                 with autocast():
                     logits = model(x)
                     loss = F.cross_entropy(logits.view(-1, config.vocab_size), y.view(-1))
-                    loss = loss / config.gradient_accumulation_steps
+                    loss = loss / accumulation_divisor
                 scaler.scale(loss).backward()
             else:
                 logits = model(x)
                 loss = F.cross_entropy(logits.view(-1, config.vocab_size), y.view(-1))
-                loss = loss / config.gradient_accumulation_steps
+                loss = loss / accumulation_divisor
                 loss.backward()
 
             # Optimizer step after accumulation
-            if (batch_idx + 1) % config.gradient_accumulation_steps == 0:
+            if (batch_idx + 1) % config.gradient_accumulation_steps == 0 or batch_idx + 1 == len(train_loader):
                 if config.use_amp:
                     for optimizer in optimizers:
                         scaler.unscale_(optimizer)
@@ -518,7 +523,7 @@ def train_model(config: ModelConfig, train_loader: DataLoader, val_loader: DataL
                         scheduler.step()
 
             # Update epoch statistics
-            epoch_loss += loss.item() * config.gradient_accumulation_steps
+            epoch_loss += loss.item() * accumulation_divisor
             predictions = logits.argmax(dim=-1)
             epoch_correct += (predictions == y).sum().item()
             epoch_total += y.numel()
@@ -526,7 +531,7 @@ def train_model(config: ModelConfig, train_loader: DataLoader, val_loader: DataL
 
             # Update progress bar
             if batch_idx % 10 == 0:
-                current_loss = loss.item() * config.gradient_accumulation_steps
+                current_loss = loss.item() * accumulation_divisor
                 current_accuracy = (predictions == y).float().mean().item()
                 current_perplexity = math.exp(min(current_loss, 20))
                 current_lr = optimizers[0].param_groups[0]["lr"]
@@ -717,6 +722,13 @@ def demonstrate_model(model: nn.Module, tokenizer, device: torch.device):
 
 if __name__ == "__main__":
     import sys
+
+    if "--demo" not in sys.argv and "--legacy-experiment" not in sys.argv:
+        raise SystemExit(
+            "Use python -m kernel_lab.baseline for verified, family-separated training. "
+            "The old CSV/window experiment has validation leakage; explicitly pass "
+            "--legacy-experiment only to reproduce that historical experiment."
+        )
     
     # Check if user wants interactive demo
     if len(sys.argv) > 1 and sys.argv[1] == "--demo":

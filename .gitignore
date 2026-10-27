@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.venv*/
+.env
+!.env.example
+artifacts/
+runs/
+data_cache/
+*.pth
+*.sif
+*.safetensors
+.pytest_cache/
+*.egg-info/
+slurm-*.out

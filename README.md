@@ -4,9 +4,9 @@ Generate complete Triton implementations with a teacher API, verify them against
 
 **Status:** measured end to end on UVA Rivanna with an A100 80GB allocation. Execution-validated kernels were generated, a LoRA and a scratch model were trained, all four models were scored on 1,200 held-out tasks with the same GPU checker, and the Qwen checkpoints were served with vLLM. PostgreSQL/pgvector retrieval is implemented but was not part of the executed path; the RAG comparison is still unmeasured. The historical CSV contains 45 pairs, not 319 or 2,000, and is not used by the new pipeline.
 
-Implementation checks: **38 tests passed**; see the [validation record](docs/IMPLEMENTATION_VALIDATION.md) for test scope and remaining integration work.
+Implementation checks: **38 tests passed** on the CPU suite, which covers split isolation, prompt construction, candidate wrapper restrictions, ledger accounting and response-only labels. Those checks use mocks and a tiny model configuration, so they do not establish measured kernel correctness; the held-out evaluation below does.
 
-Start with **[PROJECT_HANDOFF.md](PROJECT_HANDOFF.md)** for complete context and execution order. **[docs/RIVANNA.md](docs/RIVANNA.md)** covers SSH-side setup, Slurm, downloads, LoRA, vLLM and tunnels. **[docs/EMBEDDINGS.md](docs/EMBEDDINGS.md)** covers local CPU embeddings.
+This README carries the current context and execution order. **[docs/RIVANNA.md](docs/RIVANNA.md)** covers SSH-side setup, Slurm, downloads, LoRA, vLLM and tunnels. **[docs/EMBEDDINGS.md](docs/EMBEDDINGS.md)** covers local CPU embeddings.
 
 ## Pipeline
 
@@ -45,6 +45,21 @@ On Rivanna, Docker was unavailable and an Apptainer `.sif` could not be built (t
 Copy `.env.example` to private `.env`, edit values, then in Bash: `set -a; source .env; set +a`. CLIs do not auto-load `.env`. The default teacher is `cohere/north-mini-code:free` on OpenRouter; CPU embeddings can be hosted locally without a separate paid account.
 
 ## Results
+
+Stage status, from the run ledger:
+
+| Stage | Status |
+|---|---|
+| Task manifests, 6,000 tasks / 15 families | Done, `artifacts/tasks-v1.jsonl` |
+| Teacher generation | Done with xAI `grok-4.7`, 1,894 verified records |
+| GPU numerical validation | Done in an Apptainer sandbox directory |
+| SFT preparation | Done, 1,798 train / 96 validation / 0 test |
+| Qwen3.8-27B LoRA | Done, adapter saved |
+| Qwen2.5-Coder-0.5B LoRA | Done |
+| Scratch 29.5M baseline | Done |
+| Held-out evaluation, all four models | Done, 1,200 tasks each |
+| vLLM serving and latency benchmark | Done |
+| pgvector retrieval comparison | Implemented, **not run** |
 
 Every number below comes from a saved ledger or summary in `artifacts/`. Held-out means the 1,200 `test` tasks from `artifacts/tasks-v1.jsonl`: 400 each of `sigmoid_affine`, `row_max`, and `row_relu_sum`. None of those three families appears in training.
 
@@ -103,4 +118,4 @@ Render completed reports with `python -m kernel_lab.metrics PATH_TO_SUMMARY_JSON
 
 The custom model shares input/output embeddings: about **29.5M parameters** with the original 49,152-token vocabulary. RoPE now uses sequence positions, accumulation flushes partial groups, and scheduling counts optimizer updates. The old overlapping-window experiment requires `--legacy-experiment` because it leaks validation content. Use `python -m kernel_lab.baseline` for new family-separated comparisons.
 
-The custom model uses PyTorch inference; it is not supported by vLLM. Qwen base/LoRA are served with vLLM 0.32.0 in `/scratch/qdf7ea/venvs/kernel-serve-py313`, separate from the training venv because vLLM replaces torch and transformers. The [historical README](docs/LEGACY_README.md) is preserved only as superseded context.
+The custom model uses PyTorch inference; it is not supported by vLLM. Qwen base/LoRA are served with vLLM 0.32.0 in `/scratch/qdf7ea/venvs/kernel-serve-py313`, separate from the training venv because vLLM replaces torch and transformers.
